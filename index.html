@@ -2744,7 +2744,7 @@ body.teacher-theme .stuck-col { background: rgba(210,153,34,0.12) !important; }
     <div class="dashboard-header">
       <div>
         <h2>📊 Teacher Dashboard</h2>
-        <p style="font-size:0.82rem;color:var(--text2);margin-top:2px">CS Learning Hub — Corby Business Academy</p>
+        <p style="font-size:0.82rem;color:var(--text2);margin-top:2px">CS Learning Hub — Corby Business Academy · Logged in as <strong id="dash-teacher-name">Teacher</strong></p>
       </div>
       <div style="display:flex;gap:10px;flex-wrap:wrap">
         <button class="btn btn-secondary btn-sm" onclick="loadDashboard()">⟳ Refresh</button>
@@ -2938,9 +2938,9 @@ body.teacher-theme .stuck-col { background: rgba(210,153,34,0.12) !important; }
 
       <!-- PIN CHANGE -->
       <div id="spanel-pin" style="display:none">
-        <div class="card" style="max-width:440px">
-          <div class="card-title" style="margin-bottom:6px">🔑 Change Teacher PIN</div>
-          <div class="card-sub" style="margin-bottom:20px">Updates the PIN for this session. To make permanent, update TEACHER_PIN in index.html.</div>
+        <div class="card" style="max-width:520px;margin-bottom:24px">
+          <div class="card-title" style="margin-bottom:6px">🔑 My PIN</div>
+          <div class="card-sub" style="margin-bottom:20px">Change the PIN you personally log in with. Each teacher has their own PIN, stored on this device.</div>
           <div class="alert alert-error"   id="pin-change-error"   style="margin-bottom:12px"></div>
           <div class="alert alert-success" id="pin-change-success" style="margin-bottom:12px"></div>
           <div class="form-group">
@@ -2955,7 +2955,15 @@ body.teacher-theme .stuck-col { background: rgba(210,153,34,0.12) !important; }
             <label>Confirm New PIN</label>
             <input type="password" id="pin-confirm" placeholder="repeat new PIN" maxlength="8">
           </div>
-          <button class="btn btn-primary" onclick="changeTeacherPin()">Update PIN</button>
+          <button class="btn btn-primary" onclick="changeTeacherPin()">Update my PIN</button>
+        </div>
+
+        <div class="card" style="max-width:640px">
+          <div class="card-title" style="margin-bottom:6px">👥 All Teachers</div>
+          <div class="card-sub" style="margin-bottom:16px">Add, rename, or remove teacher logins. Each row is its own PIN — every teacher can sign in with their own.</div>
+          <div class="alert alert-error" id="teachers-error" style="margin-bottom:12px"></div>
+          <div id="teachers-list" style="display:flex;flex-direction:column;gap:10px"></div>
+          <button class="btn btn-secondary btn-sm" style="margin-top:14px" onclick="addTeacherRow()">+ Add teacher</button>
         </div>
       </div>
 
@@ -3098,7 +3106,12 @@ const CONFIG = {
   JSONBIN_API_KEY:  '$2a$10$hJOuTgFo6.nu44x8ldlrC.QnZAw2r4P6UUgCzOQnMLCxkxSQv9/ta',
   JSONBIN_BIN_ID:   '69fcb345250b1311c3197667',
   CLAUDE_API_KEY:   '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',
-  TEACHER_PIN:      '1984',
+  TEACHER_PIN:      '1984', // kept for backwards compatibility / fallback only
+  DEFAULT_TEACHERS: [
+    { name: 'Teacher 1', pin: '1984' },
+    { name: 'Teacher 2', pin: '2468' },
+    { name: 'Teacher 3', pin: '1357' },
+  ],
   CLASS_CODES:      [
     '7Y1','7Y2','7Y3','7Y4','7X1','7X2','7X3','7X4',
     '8Y1','8Y2','8Y3','8Y4','8X1','8X2','8X3','8X4',
@@ -3120,6 +3133,7 @@ let STATE = {
   superpower:      false,
   overlay:         'none',
   teacherMode:     false,
+  currentTeacher:  null,
   presentation:    null,   // { scenarioId, week, slides, currentIdx }
   lessonPollTimer: null,
   lessonDismissed: false,
@@ -3245,6 +3259,16 @@ async function fetchStudents() {
 
 async function saveStudents(students) {
   lsSet({ students });
+}
+
+function loadTeachers() {
+  const db = lsGet();
+  if (Array.isArray(db.teachers) && db.teachers.length) return db.teachers;
+  return CONFIG.DEFAULT_TEACHERS.map(t => ({ ...t }));
+}
+
+function saveTeachers(list) {
+  lsSet({ teachers: list });
 }
 
 async function fetchClassCodes() {
@@ -3971,6 +3995,45 @@ async function doSubmit() {
 }
 
 /* ─── RESULTS ────────────────────────────────────────────────────── */
+function getLessonBreakdown(sd, scenario) {
+  if (!scenario || !sd) return [];
+  const byWeek = {};
+  (scenario.tasks || []).forEach(t => {
+    const wk = t.week || 1;
+    if (!byWeek[wk]) {
+      const label = (LESSON_NAMES[scenario.id] || {})[wk] || `Lesson ${wk}`;
+      byWeek[wk] = { week: wk, label, score: 0, max: 0, hasScore: false };
+    }
+    byWeek[wk].max += (t.maxMarks || 0);
+    const ts = sd.taskScores ? sd.taskScores[t.id] : null;
+    if (ts && typeof ts.score === 'number') {
+      byWeek[wk].score += ts.score;
+      byWeek[wk].hasScore = true;
+    }
+  });
+  return Object.values(byWeek).sort((a, b) => a.week - b.week);
+}
+
+function renderLessonBreakdownHtml(sd, scenario) {
+  const lessons = getLessonBreakdown(sd, scenario);
+  if (!lessons.length) return '';
+  const submitted = sd && sd.status === 'submitted';
+  const rows = lessons.map(l => {
+    const scoreLabel = submitted ? `${l.score}/${l.max}` : '—';
+    const pct = submitted && l.max ? Math.round((l.score / l.max) * 100) : null;
+    const colour = pct === null ? 'var(--text3)' : pct >= 70 ? 'var(--green)' : pct >= 40 ? 'var(--amber)' : 'var(--red)';
+    return `<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border2)">
+      <span style="font-family:var(--mono);font-size:0.7rem;color:var(--text3);min-width:56px">Lesson ${l.week}</span>
+      <span style="flex:1;font-size:0.82rem">${escHtml(l.label)}</span>
+      <span style="font-family:var(--mono);font-size:0.78rem;color:${colour}">${scoreLabel}</span>
+    </div>`;
+  }).join('');
+  return `<div style="margin-bottom:14px">
+    <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--text3);margin-bottom:6px">Score by Lesson</div>
+    ${rows}
+  </div>`;
+}
+
 function renderResults(sd) {
   const s = STATE.currentScenario || STATE.scenarios.find(x => x.id === Object.keys(STATE.user.scenarios||{}).find(k => STATE.user.scenarios[k] === sd));
   const score    = sd.score || 0;
@@ -3997,7 +4060,8 @@ function renderResults(sd) {
 
   // Breakdown
   if (s) {
-    const html = s.tasks.map((t,i) => {
+    const lessonHtml = renderLessonBreakdownHtml(sd, s);
+    const taskHtml = s.tasks.map((t,i) => {
       const ts = sd.taskScores?.[t.id] || {};
       return `<div class="rb-item">
         <span class="rb-num">T${i+1}</span>
@@ -4008,13 +4072,16 @@ function renderResults(sd) {
         <span class="rb-score">${ts.score??'—'}/${t.maxMarks}</span>
       </div>`;
     }).join('');
-    document.getElementById('results-breakdown').innerHTML = html;
+    document.getElementById('results-breakdown').innerHTML = lessonHtml +
+      `<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--text3);margin:10px 0 6px">Score by Task</div>` +
+      taskHtml;
   }
 }
 
 /* ─── TEACHER DASHBOARD ──────────────────────────────────────────── */
 function exitDashboard() {
   STATE.teacherMode = false;
+  STATE.currentTeacher = null;
   document.body.classList.remove('teacher-theme');
   const pinInput = document.getElementById('pin-input');
   if (pinInput) pinInput.value = '';
@@ -4023,10 +4090,15 @@ function exitDashboard() {
 
 function checkPin() {
   const pin = document.getElementById('pin-input').value;
-  if (pin === CONFIG.TEACHER_PIN) {
+  const teachers = loadTeachers();
+  const match = teachers.find(t => t.pin === pin);
+  if (match) {
     hideAlert('pin-error');
     STATE.teacherMode = true;
+    STATE.currentTeacher = match.name;
     STATE.allStudents = [];
+    const nameEl = document.getElementById('dash-teacher-name');
+    if (nameEl) nameEl.textContent = match.name;
     // Load scenarios first so dashboard can label them
     loadScenarios().catch(()=>{}).finally(() => {
       showView('view-teacher');
@@ -4188,7 +4260,8 @@ function renderDashboard(students, scenarioFilter = '') {
     <tr class="expand-row" id="expand-${student.userId}">
       <td colspan="${tasks.length+5}">
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap">
-          <div style="flex:1">
+          <div style="flex:1;min-width:220px">
+            ${renderLessonBreakdownHtml(sd, primarySc)}
             ${submitted && sd.aiFeedback
               ? `<strong>AI Feedback:</strong><br><span style="color:var(--text2)">${escHtml(sd.aiFeedback)}</span>`
               : '<span style="color:var(--text3)">Not yet submitted.</span>'}
@@ -4336,7 +4409,10 @@ function changeTeacherPin() {
   const newPin  = document.getElementById('pin-new').value;
   const confirm = document.getElementById('pin-confirm').value;
 
-  if (current !== CONFIG.TEACHER_PIN) {
+  const teachers = loadTeachers();
+  const idx = teachers.findIndex(t => t.name === STATE.currentTeacher);
+
+  if (idx === -1 || teachers[idx].pin !== current) {
     showAlert('pin-change-error', 'Current PIN is incorrect.'); return;
   }
   if (newPin.length < 4) {
@@ -4345,14 +4421,79 @@ function changeTeacherPin() {
   if (newPin !== confirm) {
     showAlert('pin-change-error', 'New PINs do not match.'); return;
   }
+  if (teachers.some((t,i) => i !== idx && t.pin === newPin)) {
+    showAlert('pin-change-error', 'Another teacher already uses that PIN — please pick a different one.'); return;
+  }
 
-  CONFIG.TEACHER_PIN = newPin;
+  teachers[idx].pin = newPin;
+  saveTeachers(teachers);
+
   document.getElementById('pin-current').value = '';
   document.getElementById('pin-new').value     = '';
   document.getElementById('pin-confirm').value = '';
-  showAlert('pin-change-success',
-    `PIN updated to "${newPin}" for this session. To make it permanent, update TEACHER_PIN in index.html and redeploy.`,
-    'success');
+  showAlert('pin-change-success', `Your PIN has been updated to "${newPin}".`, 'success');
+  renderTeachersList();
+}
+
+/* ─── TEACHER LIST MANAGEMENT ────────────────────────────────────── */
+function renderTeachersList() {
+  const el = document.getElementById('teachers-list');
+  if (!el) return;
+  const teachers = loadTeachers();
+  el.innerHTML = teachers.map((t, i) => `
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius);padding:10px 12px">
+      <input type="text" value="${escHtml(t.name)}" id="teacher-name-${i}" placeholder="Teacher name"
+        style="flex:1;min-width:120px;background:var(--surface2);border:1px solid var(--border2);border-radius:6px;padding:6px 8px;color:var(--text);font-family:var(--sans)">
+      <input type="text" value="${escHtml(t.pin)}" id="teacher-pin-${i}" placeholder="PIN" maxlength="8"
+        style="width:90px;background:var(--surface2);border:1px solid var(--border2);border-radius:6px;padding:6px 8px;color:var(--text);font-family:var(--mono)">
+      <button class="btn btn-secondary btn-sm" onclick="saveTeacherRow(${i})">💾 Save</button>
+      <button class="btn btn-secondary btn-sm" style="color:var(--red);border-color:var(--red)" onclick="deleteTeacherRow(${i})">✕</button>
+    </div>`).join('');
+}
+
+function addTeacherRow() {
+  const teachers = loadTeachers();
+  let n = teachers.length + 1;
+  let name = `Teacher ${n}`;
+  while (teachers.some(t => t.name === name)) { n++; name = `Teacher ${n}`; }
+  teachers.push({ name, pin: String(1000 + Math.floor(Math.random() * 9000)) });
+  saveTeachers(teachers);
+  renderTeachersList();
+}
+
+function saveTeacherRow(i) {
+  hideAlert('teachers-error');
+  const teachers = loadTeachers();
+  const nameEl = document.getElementById(`teacher-name-${i}`);
+  const pinEl  = document.getElementById(`teacher-pin-${i}`);
+  if (!nameEl || !pinEl) return;
+  const name = nameEl.value.trim();
+  const pin  = pinEl.value.trim();
+
+  if (!name) { showAlert('teachers-error', 'Teacher name cannot be blank.'); return; }
+  if (pin.length < 4) { showAlert('teachers-error', 'PIN must be at least 4 digits.'); return; }
+  if (teachers.some((t, j) => j !== i && t.pin === pin)) {
+    showAlert('teachers-error', 'That PIN is already used by another teacher.'); return;
+  }
+
+  const wasCurrent = teachers[i].name === STATE.currentTeacher;
+  teachers[i] = { name, pin };
+  saveTeachers(teachers);
+  if (wasCurrent) {
+    STATE.currentTeacher = name;
+    const nameHeader = document.getElementById('dash-teacher-name');
+    if (nameHeader) nameHeader.textContent = name;
+  }
+  renderTeachersList();
+}
+
+function deleteTeacherRow(i) {
+  const teachers = loadTeachers();
+  if (teachers.length <= 1) { showAlert('teachers-error', 'At least one teacher login must remain.'); return; }
+  if (!confirm(`Remove "${teachers[i].name}" from the teacher list?`)) return;
+  teachers.splice(i, 1);
+  saveTeachers(teachers);
+  renderTeachersList();
 }
 
 /* ─── CLASS CODE MANAGER ─────────────────────────────────────────── */
@@ -4914,6 +5055,7 @@ function switchSettingsTab(tab) {
       btn.style.color       = t === tab ? 'var(--accent)' : '';
     }
   });
+  if (tab === 'pin') renderTeachersList();
 }
 
 /* ─── MEDIA MANAGER ─────────────────────────────────────────────── */
@@ -5372,9 +5514,22 @@ async function setScenarioWeek(scenarioId, week) {
 
 
 async function changeWeek(scenarioId, dir, maxWeek) {
+  // Always read the freshest saved value first, so a stale in-memory
+  // STATE never overwrites a more recent change (this is what previously
+  // made "locking back" to an earlier week unreliable).
   const cur = getUnlockedWeek(scenarioId);
   const next = Math.max(1, Math.min(maxWeek, cur + dir));
   STATE.currentWeeks[scenarioId] = next;
+
+  // Persist immediately — don't wait for a separate "Save all" click.
+  // Without this, navigating away (or the panel re-rendering) before
+  // clicking Save would silently revert the week back to its old value,
+  // which looked like the unlock "wouldn't lock back".
+  try {
+    await saveBin({ currentWeeks: STATE.currentWeeks });
+  } catch(e) {
+    console.warn('Failed to save week setting:', e);
+  }
 
   // Update display immediately
   const numEl = document.getElementById(`wk-num-${scenarioId}`);
@@ -5383,6 +5538,12 @@ async function changeWeek(scenarioId, dir, maxWeek) {
   const upBtn   = document.getElementById(`wk-up-${scenarioId}`);
   if (downBtn) downBtn.disabled = next <= 1;
   if (upBtn)   upBtn.disabled   = next >= maxWeek;
+
+  const msg = document.getElementById('visible-save-msg');
+  if (msg) {
+    msg.textContent = `✅ Week ${next} saved for this scenario`;
+    setTimeout(() => { if (msg.textContent.includes(`Week ${next} saved`)) msg.textContent = ''; }, 2000);
+  }
 }
 
 const QUIZ_BANK = {"scenario_y7_binary": {"1": [{"q": "What does binary mean?", "opts": ["A system using only 0 and 1", "A system using digits 0 to 9", "A system using letters A to F", "A system using 16 symbols"], "a": 0, "exp": "Binary is base-2 — it uses only the digits 0 and 1."}, {"q": "Why do computers use binary instead of denary?", "opts": ["Binary is easier for humans", "Electrical switches are only ON or OFF", "Computers prefer smaller numbers", "Binary was invented first"], "a": 1, "exp": "Computer circuits use electrical switches that can only be fully ON (1) or fully OFF (0)."}, {"q": "What does the digit 1 represent in binary?", "opts": ["Zero", "The switch is OFF", "The switch is ON", "The number ten"], "a": 2, "exp": "1 = ON — the electrical switch is conducting current."}, {"q": "What does the digit 0 represent in binary?", "opts": ["The switch is ON", "The number zero", "The switch is OFF", "Nothing at all"], "a": 2, "exp": "0 = OFF — the electrical switch is not conducting current."}, {"q": "What is a bit?", "opts": ["8 binary digits", "A single binary digit — 0 or 1", "A unit of speed", "A type of computer"], "a": 1, "exp": "A bit (binary digit) is the smallest unit of data — a single 0 or 1."}, {"q": "How many bits are in a byte?", "opts": ["2", "4", "8", "16"], "a": 2, "exp": "1 byte = 8 bits. This is the standard unit for storing a single character."}, {"q": "Which of these is a valid binary number?", "opts": ["10203", "FFFX", "1101", "9901"], "a": 2, "exp": "Binary only uses 0 and 1. 1101 is valid — the others contain invalid digits."}, {"q": "What is 101 shown as ON/OFF switches?", "opts": ["OFF ON OFF", "ON OFF ON", "ON ON OFF", "OFF OFF ON"], "a": 1, "exp": "1=ON, 0=OFF, 1=ON — reading left to right: ON OFF ON."}, {"q": "Which device is a computer?", "opts": ["A wooden table", "A pencil", "A smartphone", "A glass of water"], "a": 2, "exp": "A smartphone has a processor, follows programs, and processes data — it is a computer."}, {"q": "What is data?", "opts": ["A type of switch", "Raw facts and figures processed by a computer", "Only numbers", "The physical parts of a computer"], "a": 1, "exp": "Data is raw facts and figures. Computers process data to produce useful information."}], "2": [{"q": "What are the 4-bit binary place values (left to right)?", "opts": ["1, 2, 4, 8", "8, 4, 2, 1", "4, 3, 2, 1", "16, 8, 4, 2"], "a": 1, "exp": "4-bit place values are 8, 4, 2, 1 — each column doubles going left."}, {"q": "What is 0101 in denary?", "opts": ["3", "5", "6", "10"], "a": 1, "exp": "0101: 0x8 + 1x4 + 0x2 + 1x1 = 4+1 = 5."}, {"q": "What is 1010 in denary?", "opts": ["8", "10", "12", "15"], "a": 1, "exp": "1010: 1x8 + 0x4 + 1x2 + 0x1 = 8+2 = 10."}, {"q": "What is 1111 in denary?", "opts": ["7", "10", "14", "15"], "a": 3, "exp": "1111: 8+4+2+1 = 15. This is the largest 4-bit number."}, {"q": "What is 5 in 4-bit binary?", "opts": ["0100", "0101", "0110", "1000"], "a": 1, "exp": "5 = 4+1 so put 1s in the 4 and 1 columns: 0101."}, {"q": "What is 9 in 4-bit binary?", "opts": ["0110", "0111", "1001", "1010"], "a": 2, "exp": "9 = 8+1 so put 1s in the 8 and 1 columns: 1001."}, {"q": "What is the largest number in 4 bits?", "opts": ["8", "14", "15", "16"], "a": 2, "exp": "1111 = 15. You can store 16 different values (0 to 15) in 4 bits."}, {"q": "How many different values can 4 bits represent?", "opts": ["4", "8", "15", "16"], "a": 3, "exp": "2 to the power of 4 = 16 combinations (0000 through 1111)."}, {"q": "What is 1000 in denary?", "opts": ["1", "4", "8", "10"], "a": 2, "exp": "1000: only the 8-column has a 1, so the answer is 8."}, {"q": "Which binary number equals 12?", "opts": ["1001", "1010", "1011", "1100"], "a": 3, "exp": "12 = 8+4 so put 1s in the 8 and 4 columns: 1100."}], "3": [{"q": "What are the first four 8-bit place values from left?", "opts": ["8, 4, 2, 1", "128, 64, 32, 16", "256, 128, 64, 32", "64, 32, 16, 8"], "a": 1, "exp": "The left four 8-bit places are 128, 64, 32, 16."}, {"q": "What is 11111111 in denary?", "opts": ["128", "200", "254", "255"], "a": 3, "exp": "128+64+32+16+8+4+2+1 = 255. Maximum value in one byte."}, {"q": "What is 01010101 in denary?", "opts": ["55", "75", "85", "95"], "a": 2, "exp": "64+16+4+1 = 85."}, {"q": "What is 10000000 in denary?", "opts": ["8", "64", "128", "255"], "a": 2, "exp": "Only the 128 column has a 1, so the answer is 128."}, {"q": "What is 25 in 8-bit binary?", "opts": ["00011001", "00011010", "00010101", "00100001"], "a": 0, "exp": "25=16+8+1, so 00011001."}, {"q": "How many different values can 8 bits represent?", "opts": ["128", "255", "256", "512"], "a": 2, "exp": "2 to the power 8 = 256 values (0 to 255)."}, {"q": "What is a byte?", "opts": ["4 bits", "8 bits", "16 bits", "1 bit"], "a": 1, "exp": "A byte is exactly 8 bits — the standard unit for storing a character."}, {"q": "What is 10000001 in denary?", "opts": ["128", "129", "130", "131"], "a": 1, "exp": "128+1 = 129."}, {"q": "Which place value do you try FIRST converting denary to 8-bit binary?", "opts": ["1", "8", "64", "128"], "a": 3, "exp": "Always start from the leftmost largest place value: 128."}, {"q": "What is the maximum value in 1 byte?", "opts": ["128", "200", "254", "255"], "a": 3, "exp": "11111111 = 255. All 8 bits set to 1 gives the maximum."}], "4": [{"q": "What is an algorithm?", "opts": ["A type of computer", "A precise step-by-step set of instructions", "A Scratch sprite", "A binary number"], "a": 1, "exp": "An algorithm is a precise ordered set of instructions for solving a problem."}, {"q": "What is sequence in programming?", "opts": ["Running code at the same time", "Instructions carried out one after another in order", "Choosing between two paths", "Repeating code"], "a": 1, "exp": "Sequence means instructions run one at a time in the written order."}, {"q": "In Scratch, what is a sprite?", "opts": ["A line of code", "A background image", "A character or object that can move and react", "A variable"], "a": 2, "exp": "A sprite is a Scratch object that can move, change costume, and run scripts."}, {"q": "Which Scratch block starts a script?", "opts": ["Move 10 steps", "When green flag clicked", "Change score by 1", "Say Hello"], "a": 1, "exp": "When green flag clicked is the event that triggers a script to begin."}, {"q": "What happens if Scratch blocks are in the wrong order?", "opts": ["Nothing changes", "The program runs faster", "The program may behave incorrectly", "Scratch stops you"], "a": 2, "exp": "Sequence matters — wrong order means wrong behaviour."}, {"q": "What is a script in Scratch?", "opts": ["A background", "A stack of code blocks attached to a sprite", "The stage", "A sound file"], "a": 1, "exp": "A script is a connected stack of code blocks that runs when triggered."}, {"q": "Which Scratch block pauses a script?", "opts": ["Stop all", "Move 10 steps", "Wait 1 seconds", "Forever"], "a": 2, "exp": "Wait 1 seconds pauses execution — useful for timed animations."}, {"q": "What does the Forever block do?", "opts": ["Stops the program", "Runs the blocks once", "Repeats the blocks inside endlessly", "Saves the project"], "a": 2, "exp": "The Forever loop repeats its contents continuously until stopped."}, {"q": "What is the stage in Scratch?", "opts": ["A sprite that can talk", "The background where sprites perform", "A type of variable", "A code block"], "a": 1, "exp": "The stage is the 480x360 backdrop where all sprites appear."}, {"q": "Why must an algorithm be precise?", "opts": ["So it looks neat", "Vague instructions cause unexpected behaviour", "Computers prefer long instructions", "Precision makes programs faster"], "a": 1, "exp": "Computers follow instructions exactly. Vague steps cause errors."}], "5": [{"q": "What is selection in programming?", "opts": ["Running instructions in order", "Repeating code", "Choosing between paths based on a condition", "Storing a value"], "a": 2, "exp": "Selection lets a program branch based on whether a condition is true or false."}, {"q": "What does an if statement do?", "opts": ["Loops code forever", "Runs code only when a condition is true", "Stores a number", "Moves a sprite"], "a": 1, "exp": "An if statement checks a condition — if true the code inside runs."}, {"q": "What extra does if/else provide over just if?", "opts": ["It runs faster", "It handles what happens when the condition is false", "It repeats code", "It stores variables"], "a": 1, "exp": "if/else handles both outcomes — one block for true one for false."}, {"q": "What is a condition in programming?", "opts": ["A type of sprite", "A question with a true or false answer", "A background image", "A sound effect"], "a": 1, "exp": "A condition is a comparison that evaluates to either true or false."}, {"q": "What is a Boolean value?", "opts": ["A number between 0 and 100", "A type of image", "A value that is TRUE or FALSE", "A sprite costume"], "a": 2, "exp": "Boolean values are true or false — used in conditions and if statements."}, {"q": "What condition checks if an answer is correct?", "opts": ["score > 0", "answer = correct_value", "lives = 3", "timer > 0"], "a": 1, "exp": "answer = correct_value compares what was typed to the right answer."}, {"q": "What runs when an if/else condition is FALSE?", "opts": ["Nothing", "The program crashes", "The else branch", "The if block again"], "a": 2, "exp": "When the condition is false the else branch executes."}, {"q": "Which Scratch block asks a question and stores the response?", "opts": ["Say and wait", "Ask and wait", "If then", "When key pressed"], "a": 1, "exp": "Ask and wait displays a question and stores the response in the answer variable."}, {"q": "Why use if/else rather than two separate if blocks?", "opts": ["It uses less memory", "Only one branch can run — not both", "It runs faster", "Scratch requires it"], "a": 1, "exp": "if/else ensures exactly one branch executes — two ifs could both run."}, {"q": "Where does Scratch store what a player types after ask and wait?", "opts": ["input", "score", "answer", "response"], "a": 2, "exp": "Scratch stores the player response in a built-in variable called answer."}], "6": [{"q": "What is a variable in programming?", "opts": ["A fixed number", "A named container that stores a changing value", "A type of sprite", "An algorithm"], "a": 1, "exp": "A variable is a named box that holds a value that can be read and changed at any time."}, {"q": "What does initialise mean?", "opts": ["Delete a variable", "Set a variable to its starting value at the beginning", "Create a sprite", "Stop a script"], "a": 1, "exp": "Initialising means setting a variable to its starting value when the program begins."}, {"q": "Why initialise variables when the green flag is clicked?", "opts": ["To make Scratch faster", "To stop values from last game carrying over", "Scratch requires it", "To save memory"], "a": 1, "exp": "Without initialisation a variable keeps its value from the previous run causing bugs."}, {"q": "Which Scratch block increases score by 1?", "opts": ["Set score to 1", "Change score by 1", "Add 1 to score", "Score plus 1"], "a": 1, "exp": "Change score by 1 increments the current value by 1."}, {"q": "What is input in programming?", "opts": ["Data the computer sends out", "Data entered by the user", "A type of variable", "A background"], "a": 1, "exp": "Input is data coming in from the user — in Scratch captured with ask and wait."}, {"q": "What is validation in programming?", "opts": ["Making the program look nice", "Checking that input is acceptable before using it", "Running tests", "Saving a file"], "a": 1, "exp": "Validation checks that what the user entered is correct before the program processes it."}, {"q": "Score shows 5 at the start of a new game. What went wrong?", "opts": ["The if block is wrong", "The score variable was not initialised to 0", "The question is too hard", "The timer stopped"], "a": 1, "exp": "The score variable was not reset to 0 when the green flag was clicked."}, {"q": "Which variables does a binary quiz game need?", "opts": ["sprite, backdrop, sound", "score, lives, question_number", "x_position, y_position", "font, colour, size"], "a": 1, "exp": "A quiz needs score lives and question_number to track the game state."}, {"q": "What does change lives by -1 do in Scratch?", "opts": ["Sets lives to -1", "Increases lives by 1", "Subtracts 1 from lives", "Deletes the lives variable"], "a": 2, "exp": "Change by -1 subtracts 1 from the current value — used when a player answers wrong."}, {"q": "Why is validating user input important?", "opts": ["Makes programs colourful", "Unvalidated input can cause unexpected errors", "Makes programs faster", "Scratch requires it"], "a": 1, "exp": "Without validation unexpected input can crash programs or give wrong results."}]}};
